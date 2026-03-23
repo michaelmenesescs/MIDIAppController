@@ -5,6 +5,8 @@ const path = require('path');
 
 // === CONFIG ===
 const MIDI_DEVICE = 'OpenDeck | BB-S2';
+const DOWNLOAD_DIR = '/Volumes/Crucial X9/Music_Downloads';
+const BROWSER_DOWNLOAD_DIR = path.join(require('os').homedir(), 'Downloads');
 
 // Button mapping (note number -> action)
 const BUTTON_MAP = {
@@ -13,6 +15,53 @@ const BUTTON_MAP = {
   2: 'skip',
   3: 'download',
 };
+
+// === File watcher: move new .mp3 files from ~/Downloads to Crucial X9 ===
+
+let pendingDownload = false;
+
+function startFileWatcher() {
+  fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+  fs.watch(BROWSER_DOWNLOAD_DIR, (eventType, filename) => {
+    if (!filename || !filename.endsWith('.mp3') || !pendingDownload) return;
+
+    const src = path.join(BROWSER_DOWNLOAD_DIR, filename);
+
+    // Wait a moment for the file to finish writing
+    setTimeout(() => {
+      try {
+        if (!fs.existsSync(src)) return;
+        const stats = fs.statSync(src);
+        // Skip if file is still being written (less than 100KB is probably incomplete)
+        if (stats.size < 100 * 1024) return;
+
+        const dest = path.join(DOWNLOAD_DIR, filename);
+        fs.renameSync(src, dest);
+        const sizeMB = (stats.size / 1024 / 1024).toFixed(1);
+        console.log(`  -> Saved: ${filename} (${sizeMB} MB) -> ${DOWNLOAD_DIR}`);
+        pendingDownload = false;
+      } catch (err) {
+        // renameSync fails across devices, use copy+delete
+        if (err.code === 'EXDEV') {
+          try {
+            const dest = path.join(DOWNLOAD_DIR, filename);
+            fs.copyFileSync(src, dest);
+            fs.unlinkSync(src);
+            const stats = fs.statSync(dest);
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(1);
+            console.log(`  -> Saved: ${filename} (${sizeMB} MB) -> ${DOWNLOAD_DIR}`);
+            pendingDownload = false;
+          } catch (copyErr) {
+            console.error(`  -> Move error: ${copyErr.message}`);
+          }
+        } else {
+          console.error(`  -> Move error: ${err.message}`);
+        }
+      }
+    }, 2000);
+  });
+}
 
 // === AppleScript execution helper ===
 
@@ -63,13 +112,11 @@ const JS = {
     if(!btn) return "download btn not found";
     var trackTitle = document.title;
     btn.click();
-    // Watch for the blob download link to appear and auto-click it
     if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect();
     window._dlAutoSaveObserver = new MutationObserver(function(mutations) {
       mutations.forEach(function(m) {
         m.addedNodes.forEach(function(n) {
           if(n.nodeType === 1 && n.tagName === "A" && n.hasAttribute("download")) {
-            // Auto-click the save link
             n.click();
             window._dlAutoSaveObserver.disconnect();
           }
@@ -77,8 +124,7 @@ const JS = {
       });
     });
     window._dlAutoSaveObserver.observe(document.body, {childList: true, subtree: true});
-    // Safety timeout to disconnect observer after 60s
-    setTimeout(function(){ if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); }, 60000);
+    setTimeout(function(){ if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); }, 120000);
     return "downloading: " + trackTitle;
   })()`,
 
@@ -98,6 +144,10 @@ async function doAction(action) {
 
   console.log(`[${timestamp}] ${labels[action]}`);
 
+  if (action === 'download') {
+    pendingDownload = true;
+  }
+
   try {
     const result = await execInMonochrome(JS[action]);
     if (result && result !== 'missing value') {
@@ -112,10 +162,14 @@ async function doAction(action) {
 
 console.log('=== MIDI Controller -> Monochrome ===');
 console.log(`Device: ${MIDI_DEVICE}`);
+console.log(`Download dir: ${DOWNLOAD_DIR}`);
 console.log('');
 console.log('Buttons:');
 console.log('  [0] Previous  [1] Play/Pause  [2] Skip  [3] Download');
 console.log('');
+
+// Start file watcher
+startFileWatcher();
 
 let input;
 try {

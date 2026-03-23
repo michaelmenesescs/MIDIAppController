@@ -19,8 +19,11 @@ Node.js service that bridges an OpenDeck BB-S2 MIDI controller to the Monochrome
 ## How Download Works
 1. Clicks `.now-playing-bar button[title='Download current track']` in Monochrome
 2. A MutationObserver watches for the blob `<a download="...">` link Monochrome creates
-3. Auto-clicks the link — browser saves to `/Volumes/Crucial X9/Music_Downloads/`
-4. No user interaction required
+3. Auto-clicks the link — browser saves to `~/Downloads`
+4. A `fs.watch` file watcher detects the new `.mp3` in `~/Downloads` and moves it to `/Volumes/Crucial X9/Music_Downloads/`
+5. No user interaction required
+
+**Why the file watcher?** Brave blocks mixed-content fetch from HTTPS pages to HTTP localhost, so we can't POST blob data to a local server. Instead we let the browser download normally and relocate the file.
 
 ## Key Implementation Details
 - Monochrome tab is found dynamically by URL (`starts with "https://monochrome.tf"`), so window reordering doesn't matter
