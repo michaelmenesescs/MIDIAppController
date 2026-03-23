@@ -158,6 +158,54 @@ async function doAction(action) {
   }
 }
 
+// === MIDI connection with retry ===
+
+let input = null;
+const RETRY_INTERVAL_MS = 5000;
+
+function connectMIDI() {
+  const availableInputs = easymidi.getInputs();
+  if (!availableInputs.includes(MIDI_DEVICE)) {
+    console.log(`Waiting for ${MIDI_DEVICE}... (available: ${availableInputs.length ? availableInputs.join(', ') : 'none'})`);
+    setTimeout(connectMIDI, RETRY_INTERVAL_MS);
+    return;
+  }
+
+  try {
+    input = new easymidi.Input(MIDI_DEVICE);
+    console.log(`Connected to ${MIDI_DEVICE}`);
+  } catch (err) {
+    console.error(`Failed to connect: ${err.message}, retrying...`);
+    setTimeout(connectMIDI, RETRY_INTERVAL_MS);
+    return;
+  }
+
+  // Show current track
+  execInMonochrome(JS.nowPlaying).then(title => {
+    if (title && title !== 'missing value' && title !== 'Monochrome not found') {
+      console.log(`Now playing: ${title}`);
+    }
+    console.log('Listening...\n');
+  }).catch(() => {
+    console.log('Listening...\n');
+  });
+
+  // Debounce
+  let lastTrigger = 0;
+  const DEBOUNCE_MS = 300;
+
+  input.on('noteon', (msg) => {
+    if (msg.velocity === 0) return;
+
+    const now = Date.now();
+    if (now - lastTrigger < DEBOUNCE_MS) return;
+    lastTrigger = now;
+
+    const action = BUTTON_MAP[msg.note];
+    if (action) doAction(action);
+  });
+}
+
 // === Main ===
 
 console.log('=== MIDI Controller -> Monochrome ===');
@@ -168,42 +216,12 @@ console.log('Buttons:');
 console.log('  [0] Previous  [1] Play/Pause  [2] Skip  [3] Download');
 console.log('');
 
-// Start file watcher
+// Start file watcher and MIDI connection
 startFileWatcher();
-
-let input;
-try {
-  input = new easymidi.Input(MIDI_DEVICE);
-} catch (err) {
-  console.error(`Failed to connect to ${MIDI_DEVICE}:`, err.message);
-  process.exit(1);
-}
-
-// Show current track
-execInMonochrome(JS.nowPlaying).then(title => {
-  console.log(`Now playing: ${title}`);
-  console.log('Listening...\n');
-}).catch(() => {
-  console.log('Listening...\n');
-});
-
-// Debounce
-let lastTrigger = 0;
-const DEBOUNCE_MS = 300;
-
-input.on('noteon', (msg) => {
-  if (msg.velocity === 0) return;
-
-  const now = Date.now();
-  if (now - lastTrigger < DEBOUNCE_MS) return;
-  lastTrigger = now;
-
-  const action = BUTTON_MAP[msg.note];
-  if (action) doAction(action);
-});
+connectMIDI();
 
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
-  input.close();
+  if (input) input.close();
   process.exit();
 });
