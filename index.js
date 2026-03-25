@@ -136,14 +136,45 @@ end tell`;
 // === JS commands ===
 
 const JS = {
-  // Prefer now-playing-bar, fall back to fullscreen buttons
-  playpause: `(function(){ var b=document.querySelector(".now-playing-bar .play-pause-btn, .fullscreen-buttons .play-pause-btn"); if(b){b.click();return document.title} return "not found" })()`,
+  // Play/pause: direct audio control (button.click() is blocked by autoplay policy)
+  playpause: `(function(){
+    var audio = document.querySelector('audio');
+    if (!audio) return 'no audio';
+    if (audio.paused) {
+      audio.muted = true;
+      audio.play().then(function(){ audio.muted = false; }).catch(function(){});
+      return 'play: ' + document.title;
+    } else {
+      audio.pause();
+      return 'pause: ' + document.title;
+    }
+  })()`,
 
-  skip: `(function(){ var b=document.querySelector(".now-playing-bar button[title='Next'], .fullscreen-buttons button[title='Next']"); if(b){b.click();return document.title} return "not found" })()`,
+  // Skip/previous: click by stable element ID
+  skip:     `(function(){ var b=document.getElementById('next-btn'); if(b){b.click();return document.title} return 'not found' })()`,
+  previous: `(function(){ var b=document.getElementById('prev-btn'); if(b){b.click();return document.title} return 'not found' })()`,
 
-  previous: `(function(){ var b=document.querySelector(".now-playing-bar button[title='Previous'], .fullscreen-buttons button[title='Previous']"); if(b){b.click();return document.title} return "not found" })()`,
-
-  download: `(function(){ var btn=document.querySelector("button[title='Download current track']"); if(!btn) return "download btn not found"; var trackTitle=document.title; btn.click(); if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); window._dlAutoSaveObserver=new MutationObserver(function(mutations){ mutations.forEach(function(m){ m.addedNodes.forEach(function(n){ if(n.nodeType===1 && n.tagName==="A" && n.hasAttribute("download")){ n.click(); window._dlAutoSaveObserver.disconnect(); } }); }); }); window._dlAutoSaveObserver.observe(document.body,{childList:true,subtree:true}); setTimeout(function(){ if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); },120000); return "downloading: "+trackTitle; })()`,
+  // Download: click by stable element ID, then auto-click the blob save link
+  download: `(function(){
+    var btn=document.getElementById('download-current-btn');
+    if(!btn) return 'download btn not found';
+    var trackTitle=document.title;
+    btn.click();
+    if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect();
+    window._dlAutoSaveObserver=new MutationObserver(function(mutations){
+      mutations.forEach(function(m){
+        m.addedNodes.forEach(function(n){
+          if(n.nodeType===1 && n.tagName==='A' && n.hasAttribute('download')){
+            n.click();
+            window._dlAutoSaveObserver.disconnect();
+          }
+        });
+      });
+    });
+    window._dlAutoSaveObserver.observe(document.body,{childList:true,subtree:true});
+    setTimeout(function(){ if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); },120000);
+    return 'downloading: '+trackTitle;
+  })()`,
 
   nowPlaying: `document.title`,
 };
