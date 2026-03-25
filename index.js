@@ -91,18 +91,13 @@ function execInMonochrome(jsCode) {
   set foundTab to missing value
   set targetUrls to {${MONOCHROME_URLS.map(u => `"${u}"`).join(', ')}}
 
-  -- Find the tab and verify it has Monochrome's player loaded
   repeat with w in windows
     repeat with t in tabs of w
       set theUrl to URL of t
       repeat with targetUrl in targetUrls
         if theUrl starts with (contents of targetUrl) then
-          -- Verify the player is actually loaded in this tab
-          set checkResult to execute javascript "document.querySelector('.now-playing-bar') ? 'ok' : 'no-player'" in t
-          if checkResult is "ok" then
-            set foundTab to t
-            exit repeat
-          end if
+          set foundTab to t
+          exit repeat
         end if
       end repeat
       if foundTab is not missing value then exit repeat
@@ -110,7 +105,6 @@ function execInMonochrome(jsCode) {
     if foundTab is not missing value then exit repeat
   end repeat
 
-  -- Execute or report
   if foundTab is not missing value then
     tell foundTab to execute javascript "${escapedJs}"
   else
