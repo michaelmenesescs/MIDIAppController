@@ -7,6 +7,8 @@ const path = require('path');
 const MIDI_DEVICE = 'OpenDeck | BB-S2';
 const DOWNLOAD_DIR = '/Volumes/Crucial X9/Music_Downloads';
 const BROWSER_DOWNLOAD_DIR = path.join(require('os').homedir(), 'Downloads');
+// Priority order: local dev first, remote fallback
+const MONOCHROME_URLS = ['http://localhost:5173', 'https://monochrome.tf'];
 
 // Button mapping (note number -> action)
 const BUTTON_MAP = {
@@ -18,48 +20,61 @@ const BUTTON_MAP = {
 
 // === File watcher: move new .mp3 files from ~/Downloads to Crucial X9 ===
 
-let pendingDownload = false;
+function moveFile(src, dest) {
+  try {
+    fs.renameSync(src, dest);
+  } catch (err) {
+    if (err.code === 'EXDEV') {
+      // Cross-device move: copy then delete
+      fs.copyFileSync(src, dest);
+      fs.unlinkSync(src);
+    } else {
+      throw err;
+    }
+  }
+}
 
 function startFileWatcher() {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
+  // Track files we've already processed to avoid double-moves
+  const processed = new Set();
+
   fs.watch(BROWSER_DOWNLOAD_DIR, (eventType, filename) => {
-    if (!filename || !filename.endsWith('.mp3') || !pendingDownload) return;
+    if (!filename || !filename.endsWith('.mp3')) return;
+    if (processed.has(filename)) return;
 
     const src = path.join(BROWSER_DOWNLOAD_DIR, filename);
 
-    // Wait a moment for the file to finish writing
-    setTimeout(() => {
-      try {
-        if (!fs.existsSync(src)) return;
-        const stats = fs.statSync(src);
-        // Skip if file is still being written (less than 100KB is probably incomplete)
-        if (stats.size < 100 * 1024) return;
+    // Poll until the file finishes writing, then move it
+    const checkAndMove = (attempts = 0) => {
+      if (!fs.existsSync(src)) return;
 
-        const dest = path.join(DOWNLOAD_DIR, filename);
-        fs.renameSync(src, dest);
-        const sizeMB = (stats.size / 1024 / 1024).toFixed(1);
-        console.log(`  -> Saved: ${filename} (${sizeMB} MB) -> ${DOWNLOAD_DIR}`);
-        pendingDownload = false;
-      } catch (err) {
-        // renameSync fails across devices, use copy+delete
-        if (err.code === 'EXDEV') {
-          try {
-            const dest = path.join(DOWNLOAD_DIR, filename);
-            fs.copyFileSync(src, dest);
-            fs.unlinkSync(src);
-            const stats = fs.statSync(dest);
-            const sizeMB = (stats.size / 1024 / 1024).toFixed(1);
-            console.log(`  -> Saved: ${filename} (${sizeMB} MB) -> ${DOWNLOAD_DIR}`);
-            pendingDownload = false;
-          } catch (copyErr) {
-            console.error(`  -> Move error: ${copyErr.message}`);
-          }
-        } else {
-          console.error(`  -> Move error: ${err.message}`);
-        }
+      const stats = fs.statSync(src);
+      const ageMs = Date.now() - stats.mtimeMs;
+
+      // Only move files created in the last 5 minutes (ignore pre-existing files)
+      if (ageMs > 5 * 60 * 1000) return;
+
+      // Wait for file to stop growing: retry if < 500KB or still young
+      if (stats.size < 500 * 1024 && attempts < 10) {
+        setTimeout(() => checkAndMove(attempts + 1), 1500);
+        return;
       }
-    }, 2000);
+
+      try {
+        processed.add(filename);
+        const dest = path.join(DOWNLOAD_DIR, filename);
+        moveFile(src, dest);
+        const sizeMB = (stats.size / 1024 / 1024).toFixed(1);
+        console.log(`  -> Saved: ${filename} (${sizeMB} MB) -> Crucial X9`);
+      } catch (err) {
+        processed.delete(filename);
+        console.error(`  -> Move error: ${err.message}`);
+      }
+    };
+
+    setTimeout(() => checkAndMove(), 2000);
   });
 }
 
@@ -67,30 +82,56 @@ function startFileWatcher() {
 
 function execInMonochrome(jsCode) {
   return new Promise((resolve, reject) => {
-    const escapedJs = jsCode.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    // Collapse to single line — AppleScript strings cannot contain newlines
+    const singleLine = jsCode.replace(/\n\s*/g, ' ');
+    // Escape for AppleScript string: backslashes and double quotes
+    const escapedJs = singleLine.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
     const script = `tell application "Brave Browser"
-  set monoTab to missing value
-  repeat with i from 1 to (count of windows)
-    repeat with j from 1 to (count of tabs of window i)
-      if URL of tab j of window i starts with "https://monochrome.tf" then
-        set monoTab to tab j of window i
-        exit repeat
-      end if
+  set foundTab to missing value
+  set targetUrls to {${MONOCHROME_URLS.map(u => `"${u}"`).join(', ')}}
+
+  -- Find the tab and verify it has Monochrome's player loaded
+  repeat with w in windows
+    repeat with t in tabs of w
+      set theUrl to URL of t
+      repeat with targetUrl in targetUrls
+        if theUrl starts with (contents of targetUrl) then
+          -- Verify the player is actually loaded in this tab
+          set checkResult to execute javascript "document.querySelector('.now-playing-bar') ? 'ok' : 'no-player'" in t
+          if checkResult is "ok" then
+            set foundTab to t
+            exit repeat
+          end if
+        end if
+      end repeat
+      if foundTab is not missing value then exit repeat
     end repeat
-    if monoTab is not missing value then exit repeat
+    if foundTab is not missing value then exit repeat
   end repeat
-  if monoTab is missing value then return "Monochrome not found"
-  tell monoTab to execute javascript "${escapedJs}"
+
+  -- Execute or report
+  if foundTab is not missing value then
+    tell foundTab to execute javascript "${escapedJs}"
+  else
+    return "Monochrome not found"
+  end if
 end tell`;
 
-    const tmpFile = path.join(__dirname, `.tmp_${Date.now()}.scpt`);
+    const tmpFile = path.join(__dirname, `.tmp_${Date.now()}_${Math.floor(Math.random() * 1000)}.scpt`);
     fs.writeFileSync(tmpFile, script);
 
     execFile('osascript', [tmpFile], (err, stdout, stderr) => {
-      try { fs.unlinkSync(tmpFile); } catch(e) {}
+      try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (e) {}
+
       if (err) {
-        reject(new Error(stderr || err.message));
+        // Provide more context for AppleScript errors
+        const errMsg = stderr || err.message;
+        if (errMsg.includes('-10004')) {
+          reject(new Error('Brave privilege violation: Enable "Allow JavaScript from Apple Events" in Brave > View > Developer'));
+        } else {
+          reject(new Error(errMsg.trim()));
+        }
       } else {
         resolve(stdout.trim());
       }
@@ -101,32 +142,14 @@ end tell`;
 // === JS commands ===
 
 const JS = {
-  playpause: `(function(){ var b=document.querySelector(".now-playing-bar .play-pause-btn"); if(b){b.click();return b.title} return "not found" })()`,
+  // Prefer now-playing-bar, fall back to fullscreen buttons
+  playpause: `(function(){ var b=document.querySelector(".now-playing-bar .play-pause-btn, .fullscreen-buttons .play-pause-btn"); if(b){b.click();return document.title} return "not found" })()`,
 
-  skip: `(function(){ var b=document.querySelector(".now-playing-bar button[title='Next']"); if(b){b.click();return document.title} return "not found" })()`,
+  skip: `(function(){ var b=document.querySelector(".now-playing-bar button[title='Next'], .fullscreen-buttons button[title='Next']"); if(b){b.click();return document.title} return "not found" })()`,
 
-  previous: `(function(){ var b=document.querySelector(".now-playing-bar button[title='Previous']"); if(b){b.click();return document.title} return "not found" })()`,
+  previous: `(function(){ var b=document.querySelector(".now-playing-bar button[title='Previous'], .fullscreen-buttons button[title='Previous']"); if(b){b.click();return document.title} return "not found" })()`,
 
-  download: `(function(){
-    var btn = document.querySelector(".now-playing-bar button[title='Download current track']");
-    if(!btn) return "download btn not found";
-    var trackTitle = document.title;
-    btn.click();
-    if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect();
-    window._dlAutoSaveObserver = new MutationObserver(function(mutations) {
-      mutations.forEach(function(m) {
-        m.addedNodes.forEach(function(n) {
-          if(n.nodeType === 1 && n.tagName === "A" && n.hasAttribute("download")) {
-            n.click();
-            window._dlAutoSaveObserver.disconnect();
-          }
-        });
-      });
-    });
-    window._dlAutoSaveObserver.observe(document.body, {childList: true, subtree: true});
-    setTimeout(function(){ if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); }, 120000);
-    return "downloading: " + trackTitle;
-  })()`,
+  download: `(function(){ var btn=document.querySelector("button[title='Download current track']"); if(!btn) return "download btn not found"; var trackTitle=document.title; btn.click(); if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); window._dlAutoSaveObserver=new MutationObserver(function(mutations){ mutations.forEach(function(m){ m.addedNodes.forEach(function(n){ if(n.nodeType===1 && n.tagName==="A" && n.hasAttribute("download")){ n.click(); window._dlAutoSaveObserver.disconnect(); } }); }); }); window._dlAutoSaveObserver.observe(document.body,{childList:true,subtree:true}); setTimeout(function(){ if(window._dlAutoSaveObserver) window._dlAutoSaveObserver.disconnect(); },120000); return "downloading: "+trackTitle; })()`,
 
   nowPlaying: `document.title`,
 };
@@ -143,10 +166,6 @@ async function doAction(action) {
   };
 
   console.log(`[${timestamp}] ${labels[action]}`);
-
-  if (action === 'download') {
-    pendingDownload = true;
-  }
 
   try {
     const result = await execInMonochrome(JS[action]);
@@ -190,27 +209,63 @@ function connectMIDI() {
     console.log('Listening...\n');
   });
 
-  // Debounce
-  let lastTrigger = 0;
-  const DEBOUNCE_MS = 300;
+  // Per-button debounce — BB-S2 sends duplicate note-on events per press
+  const lastTriggerByNote = {};
+  const DEBOUNCE_MS = 600;
 
   input.on('noteon', (msg) => {
     if (msg.velocity === 0) return;
 
     const now = Date.now();
-    if (now - lastTrigger < DEBOUNCE_MS) return;
-    lastTrigger = now;
+    const last = lastTriggerByNote[msg.note] || 0;
+    if (now - last < DEBOUNCE_MS) return;
+    lastTriggerByNote[msg.note] = now;
 
     const action = BUTTON_MAP[msg.note];
     if (action) doAction(action);
   });
 }
 
+// === PID file guard: prevent duplicate instances ===
+
+const PID_FILE = path.join(__dirname, '.midi-controller.pid');
+
+function killStaleProcess() {
+  try {
+    if (!fs.existsSync(PID_FILE)) return;
+    const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    if (isNaN(oldPid) || oldPid === process.pid) return;
+    try {
+      process.kill(oldPid, 0); // check if alive
+      console.log(`Killing stale instance (PID ${oldPid})...`);
+      process.kill(oldPid, 'SIGTERM');
+    } catch (e) {
+      // Process doesn't exist — stale PID file
+    }
+  } catch (e) {}
+}
+
+function writePidFile() {
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function cleanupPidFile() {
+  try { fs.unlinkSync(PID_FILE); } catch (e) {}
+}
+
+killStaleProcess();
+writePidFile();
+
 // === Main ===
 
 console.log('=== MIDI Controller -> Monochrome ===');
 console.log(`Device: ${MIDI_DEVICE}`);
 console.log(`Download dir: ${DOWNLOAD_DIR}`);
+console.log('');
+console.log('Troubleshooting:');
+console.log('  If MIDI events are not arriving, check if Brave Browser is blocking them.');
+console.log('  Go to brave://settings/content/midiDevices and ensure it is NOT using the BB-S2.');
+console.log('  Also ensure "Allow JavaScript from Apple Events" is enabled in Brave > View > Developer.');
 console.log('');
 console.log('Buttons:');
 console.log('  [0] Previous  [1] Play/Pause  [2] Skip  [3] Download');
@@ -220,8 +275,12 @@ console.log('');
 startFileWatcher();
 connectMIDI();
 
-process.on('SIGINT', () => {
+function shutdown() {
   console.log('\nShutting down...');
+  cleanupPidFile();
   if (input) input.close();
   process.exit();
-});
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
